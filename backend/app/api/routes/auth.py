@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.database.connection import get_db
-from app.database.models import User, Account
+from app.database.models import User, Account, RefreshToken
 from app.schemas.auth import CreateAccountRequest, CreateAccountResponse
 
 
 from datetime import datetime, timedelta, timezone
+import hashlib,secrets
+
 
 from app.core.config import settings
 from app.core.security import (
@@ -16,15 +18,25 @@ from app.core.security import (
     create_refresh_token,
     hash_refresh_token,
 )
-from app.database.models import RefreshToken
-from app.schemas.auth import LoginRequest, LoginResponse
+ 
+from app.schemas.auth import (
+    LoginRequest,
+    LoginResponse,
+    LogoutResponse,
+)
 
+from app.schemas.auth import (
+    RefreshTokenRequest,
+    RefreshTokenResponse,
+)
 
 
 router = APIRouter(
     prefix="/api/v1/auth",
     tags=["Authentication"]
 )
+
+
 
 # Create account route
 
@@ -86,6 +98,8 @@ def create_account(
         account_number=account.account_number
     )
 
+
+
 # Login route
 
 @router.post("/login", response_model=LoginResponse)
@@ -143,3 +157,157 @@ def login(
         token_type="bearer",
     )
 
+
+
+# Refresh token route
+
+@router.post(
+    "/refresh",
+    response_model=RefreshTokenResponse,
+    status_code=status.HTTP_200_OK,
+)
+def refresh_access_token(
+    request: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    # Hash the refresh token received from the client.
+    token_hash = hashlib.sha256(
+        request.refresh_token.encode("utf-8")
+    ).hexdigest()
+
+    # Find and lock the matching database record.
+    stored_token = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == token_hash)
+        .with_for_update()
+        .first()
+    )
+
+    # Use a generic error to avoid exposing token details.
+    invalid_token_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    if stored_token is None:
+        raise invalid_token_error
+
+    # Reject revoked tokens.
+    if stored_token.revoked:
+        raise invalid_token_error
+
+    # Reject expired tokens.
+    now = datetime.now(timezone.utc)
+
+    if stored_token.expires_at <= now:
+        stored_token.revoked = True
+        db.commit()
+        raise invalid_token_error
+
+    try:
+        # Find the user associated with this token.
+        user = (
+            db.query(User)
+            .filter(User.id == stored_token.user_id)
+            .first()
+        )
+
+        if user is None or not user.is_active:
+            stored_token.revoked = True
+            db.commit()
+            raise invalid_token_error
+
+        # Generate a new access token.
+        new_access_token = create_access_token(user.id)
+
+        # Generate a new refresh token.
+        new_refresh_token = secrets.token_urlsafe(48)
+
+        new_refresh_token_hash = hashlib.sha256(
+            new_refresh_token.encode("utf-8")
+        ).hexdigest()
+
+        # Revoke the old refresh token.
+        stored_token.revoked = True
+
+        # Store only the new token's hash.
+        new_token_record = RefreshToken(
+            user_id=user.id,
+            token_hash=new_refresh_token_hash,
+            expires_at=now + timedelta(
+                days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+            ),
+            revoked=False,
+        )
+
+        db.add(new_token_record)
+
+        # Revoke the old token and store the new one atomically.
+        db.commit()
+
+        return RefreshTokenResponse(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token,
+            token_type="bearer",
+        )
+
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to refresh session",
+        )
+
+
+# Logout route
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    status_code=status.HTTP_200_OK,
+)
+def logout(
+    request: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    # Hash the refresh token received from the client.
+    token_hash = hashlib.sha256(
+        request.refresh_token.encode("utf-8")
+    ).hexdigest()
+
+    try:
+        # Find the token record and lock it during the update.
+        stored_token = (
+            db.query(RefreshToken)
+            .filter(RefreshToken.token_hash == token_hash)
+            .with_for_update()
+            .first()
+        )
+
+        # Reject unknown tokens.
+        if stored_token is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
+        # Revoke the token if it hasn't already been revoked.
+        if not stored_token.revoked:
+            stored_token.revoked = True
+            db.commit()
+
+        return LogoutResponse(
+            message="Logout successful"
+        )
+
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to complete logout",
+        )
