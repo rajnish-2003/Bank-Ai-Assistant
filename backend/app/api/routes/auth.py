@@ -32,7 +32,7 @@ from app.schemas.auth import (
 
 
 router = APIRouter(
-    prefix="/api/v1/auth",
+    prefix="/auth",
     tags=["Authentication"]
 )
 
