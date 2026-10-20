@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-import jwt
+import jwt,uuid
 from pwdlib import PasswordHash
 import hashlib,secrets
 
@@ -19,12 +19,15 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(user_id: int) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(
         minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
 
     payload = {
         "sub": str(user_id),
+        "jti": str(uuid.uuid4()),
+        "iat": now,
         "exp": expire,
     }
 
