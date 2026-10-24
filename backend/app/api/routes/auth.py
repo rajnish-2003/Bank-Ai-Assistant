@@ -1,17 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-
+from fastapi.security import HTTPAuthorizationCredentials,HTTPBearer
+from jwt.exceptions import InvalidTokenError
+from app.core.redis_client import redis_client
+from app.core.security import decode_access_token
 from app.core.security import hash_password
 from app.database.connection import get_db
 from app.database.models import User, Account, RefreshToken
 from app.schemas.auth import CreateAccountRequest, CreateAccountResponse
-
-
 from datetime import datetime, timedelta, timezone
-import hashlib,secrets
-
-
 from app.core.config import settings
+
+import hashlib,secrets,time
+
 from app.core.security import (
     verify_password,
     create_access_token,
@@ -33,9 +34,10 @@ from app.schemas.auth import (
 
 router = APIRouter(
     prefix="/auth",
-    tags=["Authentication"]
+    tags=["Authentication"],
 )
 
+bearer_scheme = HTTPBearer()
 
 
 # Create account route
@@ -271,15 +273,44 @@ def refresh_access_token(
 )
 def logout(
     request: RefreshTokenRequest,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ):
-    # Hash the refresh token received from the client.
+    # Validate the access token and extract its unique ID and expiry.
+    access_token = credentials.credentials
+
+    try:
+        payload = decode_access_token(access_token)
+        token_id = payload.get("jti")
+        expires_at = payload.get("exp")
+
+        if not token_id or expires_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid access token",
+            )
+
+        ttl = int(float(expires_at) - time.time())
+
+        if ttl <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access token has expired",
+            )
+
+    except (InvalidTokenError, ValueError, TypeError, OverflowError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid access token",
+        )
+
+    # Hash the refresh token before looking it up in PostgreSQL.
     token_hash = hashlib.sha256(
         request.refresh_token.encode("utf-8")
     ).hexdigest()
 
     try:
-        # Find the token record and lock it during the update.
+        # Find and lock the refresh-token record.
         stored_token = (
             db.query(RefreshToken)
             .filter(RefreshToken.token_hash == token_hash)
@@ -287,24 +318,39 @@ def logout(
             .first()
         )
 
-        # Reject unknown tokens.
-        if stored_token is None:
+        if stored_token is None or stored_token.revoked:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid refresh token",
+                detail="Invalid or revoked refresh token",
             )
 
-        # Revoke the token if it hasn't already been revoked.
-        if not stored_token.revoked:
-            stored_token.revoked = True
-            db.commit()
+        # Add the access token's jti to Redis until its expiry.
+        try:
+            result = redis_client.set(
+                f"blacklist:access:{token_id}",
+                "1",
+                ex=ttl,
+            )
 
-        return LogoutResponse(
-            message="Logout successful"
-        )
+            if not result:
+                raise RuntimeError("Redis blacklist write failed")
+
+        except Exception:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service temporarily unavailable",
+            )
+
+        # Revoke the refresh token in PostgreSQL.
+        stored_token.revoked = True
+        db.commit()
+
+        return LogoutResponse(message="Logout successful")
 
     except HTTPException:
         raise
+
     except Exception:
         db.rollback()
         raise HTTPException(

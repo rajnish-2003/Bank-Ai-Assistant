@@ -1,10 +1,19 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-
-from sqlalchemy import Boolean, DateTime, String, Numeric, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.connection import Base
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    Sequence,
+    String,
+    Boolean
+)
 
 #User Model
 
@@ -133,6 +142,69 @@ class RefreshToken(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+#Transaction Model
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    __table_args__ = (
+        CheckConstraint(
+            "amount > 0",
+            name="ck_transactions_amount_positive",
+        ),
+        CheckConstraint(
+            "transaction_type IN ('DEBIT', 'CREDIT')",
+            name="ck_transactions_type_valid",
+        ),
+        Index(
+            "ix_transactions_account_created",
+            "account_id",
+            "transaction_date",
+        ),
+    )
+
+    # Unique sequential transaction ID
+    transaction_id: Mapped[int] = mapped_column(
+        Sequence("transaction_id_seq", start=10001),
+        primary_key=True,
+    )
+
+    # Account whose balance was debited or credited
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # Shared ID links the sender's DEBIT and receiver's CREDIT
+    transfer_reference: Mapped[str] = mapped_column(
+        String(36),
+        nullable=False,
+        index=True,
+    )
+
+    transaction_type: Mapped[str] = mapped_column(
+        String(10),
+        nullable=False,
+    )
+
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(15, 2),
+        nullable=False,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    transaction_date: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
