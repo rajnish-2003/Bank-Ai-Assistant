@@ -120,7 +120,7 @@ def transfer_money(
         db.commit()
 
         return TransferResponse(
-            message="Transfer successful",
+            message="Transaction successful",
             transfer_reference=transfer_reference,
             amount=request.amount,
             sender_balance=sender.balance,
@@ -136,5 +136,5 @@ def transfer_money(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail="Transfer failed. No changes were saved.",
+            detail="Transaction failed",
         )

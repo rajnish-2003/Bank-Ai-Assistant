@@ -6,8 +6,8 @@ from app.database.models import User
 from app.schemas.user import UserProfileResponse
 
 router = APIRouter(
-    prefix="/user",
-    tags=["User"],
+    prefix="/users",
+    tags=["Users"],
 )
 
 

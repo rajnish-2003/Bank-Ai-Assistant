@@ -171,7 +171,7 @@ class Transaction(Base):
 
     # Unique sequential transaction ID
     transaction_id: Mapped[int] = mapped_column(
-        Sequence("transaction_id_seq", start=10001),
+        Sequence("transaction_sequence", start=100),
         primary_key=True,
     )
 
